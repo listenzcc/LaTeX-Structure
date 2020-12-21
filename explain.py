@@ -19,7 +19,10 @@ def main(path=path):
     ltxp = LaTeX_Parser(path)
     ltxp.read_file()
     features = ltxp.parse_features()
-    features.to_html('a.html')
+    # features.to_html('a.html')
+    html = ltxp.generate_page()
+    with open('a.html', 'w') as f:
+        f.write(html)
     webbrowser.open('a.html')
 
 

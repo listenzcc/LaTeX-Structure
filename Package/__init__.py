@@ -31,3 +31,5 @@ LOGGER.info('LaTeX Structure Parsing Package is initialized.')
 # LOGGER.warning('Warn message')
 # LOGGER.error('Error message')
 # LOGGER.critical('Critical message')
+
+TEMP_HTML_PATH = _get(os.path.join('Src', 'index.html'))
