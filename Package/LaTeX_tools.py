@@ -8,12 +8,14 @@ from . import LOGGER, CONFIG, TEMP_HTML_PATH
 feature_levels = CONFIG['FeatureLevels']
 feature_keys = CONFIG['FeatureKeys']
 feature_others = CONFIG['FeatureOthers']
+feature_labels = CONFIG['FeatureLabels']
 
 
 def startswith_feature(line,
                        features=[feature_levels,
                                  feature_keys,
-                                 feature_others]):
+                                 feature_others,
+                                 feature_labels]):
     # Check if the [line] startswith keys in features
     # Regularize the [line]
     line = line.strip()
@@ -140,6 +142,7 @@ class LaTeX_Parser(object):
                     dct = dict(dct,
                                Name=_name,
                                Label=_label)
+
             # Match end
             if key == 'end':
                 # ! \\end can not overcount \\begin
@@ -167,7 +170,7 @@ class LaTeX_Parser(object):
                         raise AssertionError(err)
                     features['ExpandTo'].iloc[begin_iloc] = current_iloc
             # Match label
-            if key == 'label':
+            if key in feature_labels:
                 features['Label'].iloc[begin_iloc] = name
 
             # Record the [line]
@@ -217,7 +220,7 @@ class LaTeX_Parser(object):
             level=0
         )
 
-        def _add(line):
+        def _add(line, innerHTML_tree=innerHTML_tree):
             # Method of add [line] to innerHTML_tree
             innerHTML_tree.append(line)
             if line.startswith('<div'):
@@ -253,6 +256,12 @@ class LaTeX_Parser(object):
             # ExpandTo is not '-' means it is a beginner of a block
             if not se['ExpandTo'] == '-':
                 _add(_wrap('p', '{Key}: {Name}: {Label}'.format(**se)))
+                continue
+
+            # Print subfile as plant-text
+            if se['Key'] == 'subfile':
+                _add(_wrap('p', '{Key}: {Name}: {Label}'.format(**se)))
+                continue
 
         # Close the unclosed divs
         while state['div_count'] > 0:
