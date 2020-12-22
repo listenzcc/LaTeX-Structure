@@ -8,14 +8,15 @@ from . import LOGGER, CONFIG, TEMP_HTML_PATH
 feature_levels = CONFIG['FeatureLevels']
 feature_keys = CONFIG['FeatureKeys']
 feature_others = CONFIG['FeatureOthers']
+feature_controls = CONFIG['FeatureControls']
 feature_labels = CONFIG['FeatureLabels']
 
 
 def startswith_feature(line,
-                       features=[feature_levels,
-                                 feature_keys,
-                                 feature_others,
-                                 feature_labels]):
+                       features=[
+                           feature_levels, feature_keys, feature_others,
+                           feature_controls, feature_labels
+                       ]):
     # Check if the [line] startswith keys in features
     # Regularize the [line]
     line = line.strip()
@@ -25,6 +26,46 @@ def startswith_feature(line,
             return True
 
     return False
+
+
+def parse_row(row):
+    # Parse single [row] of .text file,
+    # ONLY parse control rows,
+    # select key, params and value from the row.
+    row = row.strip()
+    if not row.startswith('\\'):
+        return []
+
+    split = [e.strip() for e in row.split('\\') if e]
+
+    def _parse(s):
+        key = '-'
+        params = '-'
+        value = '-'
+
+        if '[' in s and '{' in s:
+            # [s] has params, and has value
+            key = s.split('[')[0]
+            params = s.split('[')[1].split(']')[0]
+            value = s.split('{')[1].split('}')[0]
+
+        if '[' in s and '{' not in s:
+            # [s] has params, and has no value
+            key = s.split('[')[0]
+            params = s.split('[')[1].split(']')[0]
+
+        if '[' not in s and '{' in s:
+            # [s] has no params, and has value
+            key = s.split('{')[0]
+            value = s.split('{')[1].split('}')[0]
+
+        if '[' not in s and '{' not in s:
+            # [s] has no params, and has no value
+            key = s
+
+        return dict(key=key, params=params, value=value)
+
+    return [_parse(s) for s in split]
 
 
 class LaTeX_Parser(object):
@@ -67,9 +108,10 @@ class LaTeX_Parser(object):
 
     def parse_features(self):
         # Parse the [self.feature_lines]
-        columns = ['Key', 'Name', 'Label',
-                   'Tracking', 'ExpandTo',
-                   'Level', 'Seek', 'LineCount']
+        columns = [
+            'Key', 'Params', 'Value', 'Label', 'Tracking', 'ExpandTo', 'Level',
+            'Seek', 'LineCount'
+        ]
         features = pd.DataFrame(columns=columns)
 
         # Init values
@@ -81,110 +123,88 @@ class LaTeX_Parser(object):
         for line in tqdm(self.feature_lines):
             # Parse the line
             content, seek, line_count = line
-            key = content.split('{')[0][1:]
-            name = content.split('{', 1)[1][:-1]
+            for parsed in parse_row(content):
+                key = parsed['key']
+                params = parsed['params']
+                value = parsed['value']
 
-            dct = dict(
-                Name=name,
-                Key=key,
-                Seek=seek,
-                LineCount=line_count,
-            )
+                # Init dct
+                dct = dict(
+                    Key=key,
+                    Params=params,
+                    Value=value,
+                    Seek=seek,
+                    LineCount=line_count,
+                )
 
-            if '\\label' in name:
-                LOGGER.warning(', '.join([
-                    f'Detecting misplaced "\\label" define in line {line_count}',
-                    'it means you put "\\label" define block in the same line of something like "\\begin"',
-                    'it can be fixed',
-                    'however it is not recommended', ]))
+                if key in ['begin', 'end'] and value == 'document':
+                    features = features.append(dct, ignore_index=True)
+                    continue
 
-            if any([key == 'begin' and name == 'document',
-                    key == 'end' and name == 'document']):
-                features = features.append(pd.Series(dct),
-                                           ignore_index=True)
-                continue
+                # New record will be append to the [features] DataFrame finally,
+                # so, the "current_iloc" equals to the length of [features]
+                current_iloc = len(features)
 
-            # New record will be append to the existing [features] DataFrame,
-            # so, the current iloc equals to the length of [features]
-            current_iloc = len(features)
+                # Operation on conditions
+                # Get current [level] and pop tailing trackings until satisfying
+                # the situation of [level] is LARGER than the latest tracking
+                if key in feature_levels:
+                    level = int(feature_levels[key])
+                    while len(tracking):
+                        if level > features.iloc[tracking[-1]]['Level']:
+                            break
+                        tracking.pop()
+                    tracking.append(current_iloc)
+                    dct = dict(dct, Tracking=tracking.copy(), Level=level)
 
-            # Operation on conditions,
-            # get current [level] and pop tailing trackings until satisfying
-            # [level] is LARGER than latest tracking
-            if key in feature_levels:
-                level = int(feature_levels[key])
-                while len(tracking):
-                    if level > features.iloc[tracking[-1]]['Level']:
-                        break
-                    tracking.pop()
-                tracking.append(current_iloc)
-                dct = dict(dct,
-                           Tracking=tracking.copy(),
-                           Level=level,)
+                # Inner count
+                # Match begin
+                if key == 'begin':
+                    if inner_count == 0:
+                        begin_iloc = current_iloc
+                    inner_count += 1
 
-            # Inner count
-            # Match begin
-            if key == 'begin':
-                if inner_count == 0:
-                    begin_iloc = current_iloc
-                inner_count += 1
-
-                # ! Try to handle the issue of same-line-label
-                if '\\label{' in name:
-                    _name, _label = name.split('\\label{', 1)
-
-                    _name = _name.strip()
-                    if _name.endswith('}'):
-                        _name = _name[:-1]
-
-                    _label = _label.strip()
-
-                    dct = dict(dct,
-                               Name=_name,
-                               Label=_label)
-
-            # Match end
-            if key == 'end':
-                # ! \\end can not overcount \\begin
-                try:
-                    assert(inner_count > 0)
-                except AssertionError as err:
-                    LOGGER.error(', '.join([f'Found "end" without "begin" in line "{line_count}"',
-                                            'this always means an incorrect .tex file is being processed',
-                                            'please check it.']))
-                    raise AssertionError(err)
-
-                inner_count -= 1
-
-                # When [inner_count] equals to zero,
-                # it means the begin ends here
-                if inner_count == 0:
-                    # ! The name of the end has to equal with its begin
+                # Match end
+                if key == 'end':
+                    # ! \\end can not overcount \\begin
                     try:
-                        assert(features['Name'].iloc[begin_iloc] == name)
+                        assert (inner_count > 0)
                     except AssertionError as err:
-                        _line_count = features['LineCount'].iloc[begin_iloc]
-                        LOGGER.error(', '.join([f'Found "end" mismatch with "begin" in line "{line_count}"',
-                                                f'the detected "begin" line is "{_line_count}"',
-                                                'this always means something wrong within the block between begin and end']))
-                        raise AssertionError(err)
-                    features['ExpandTo'].iloc[begin_iloc] = current_iloc
-            # Match label
-            if key in feature_labels:
-                features['Label'].iloc[begin_iloc] = name
+                        LOGGER.error(', '.join([
+                            f'Found "end" without "begin" in line "{line_count}"',
+                            'this always means an incorrect .tex file is being processed',
+                            'please check it.'
+                        ]))
+                        raise err
 
-            # Record the [line]
-            features = features.append(pd.Series(
-                dct),
-                #     dict(
-                #     Name=name,
-                #     Key=key,
-                #     Tracking=tracking.copy(),
-                #     Level=level,
-                #     Seek=seek,
-                #     LineCount=line_count,
-                # )),
-                ignore_index=True)
+                    inner_count -= 1
+
+                    # When [inner_count] is less than or equals to zero,
+                    # it means the begin ends here
+                    if not inner_count > 0:
+                        # ! The name of the end has to equal with its begin
+                        try:
+                            assert (
+                                features['Value'].iloc[begin_iloc] == value)
+                        except AssertionError as err:
+                            _line_count = features['LineCount'].iloc[
+                                begin_iloc]
+                            LOGGER.error(', '.join([
+                                f'Found "end" mismatch with "begin" in line "{line_count}"',
+                                f'the detected "begin" line is "{_line_count}"',
+                                'this always means something wrong within the block between begin and end'
+                            ]))
+                            raise err
+                        features['ExpandTo'].iloc[begin_iloc] = current_iloc
+
+                # Match label
+                if key in feature_labels and inner_count == 1:
+                    features['Label'].iloc[begin_iloc] = value
+
+                # Record the [dct] finally
+                features = features.append(pd.Series(dct), ignore_index=True)
+
+                continue
 
         # Select and re-order the columns
         features = features[columns]
@@ -215,10 +235,7 @@ class LaTeX_Parser(object):
         # Generate tree-structure,
         # fill outline
         innerHTML_tree = []
-        state = dict(
-            div_count=0,
-            level=0
-        )
+        state = dict(div_count=0, level=0)
 
         def _add(line, innerHTML_tree=innerHTML_tree):
             # Method of add [line] to innerHTML_tree
@@ -274,9 +291,8 @@ class LaTeX_Parser(object):
         # Fill content
         content = open(self.path).read()
         # The code will be wrapped by <pre><code ...> as highlight.js requires
-        content = '\n'.join(['<pre><code class="tex">',
-                             content,
-                             '</code></pre>'])
+        content = '\n'.join(
+            ['<pre><code class="tex">', content, '</code></pre>'])
         html = html.replace('<!-- Selected Area -->', content)
 
         return html
