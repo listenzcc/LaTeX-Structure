@@ -28,44 +28,63 @@ def startswith_feature(line,
     return False
 
 
-def parse_row(row):
-    # Parse single [row] of .text file,
-    # ONLY parse control rows,
-    # select key, params and value from the row.
-    row = row.strip()
-    if not row.startswith('\\'):
-        return []
+class FeatureRow(object):
+    def __init__(self):
+        self.walls = {'\\': 'Key', '[': 'Params', '{': 'Values'}
+        self.symbols = dict(Key='\\', Params='[]', Values='{}')
 
-    split = [e.strip() for e in row.split('\\') if e]
+    def load(self, row):
+        row = row.strip()
+        assert (row.startswith(self.symbols['Key']))
+        self.row = row
+        return row
 
-    def _parse(s):
-        key = '-'
-        params = '-'
-        value = '-'
+    def hit_wall(self):
+        hits = [self.row.find(w) for w in self.walls]
+        hits = sorted([h for h in hits if h > 0])
+        if len(hits) == 0:
+            hits = [len(self.row)]
+        row = self.row[:hits[0]].strip()
+        self.row = self.row[hits[0]:].strip()
+        return row
 
-        if '[' in s and '{' in s:
-            # [s] has params, and has value
-            key = s.split('[')[0]
-            params = s.split('[')[1].split(']')[0]
-            value = s.split('{')[1].split('}')[0]
+    def get_closed(self, wrapper):
+        left, right = wrapper
+        assert (self.row.startswith(left))
+        count = 0
+        for j, c in enumerate(self.row):
+            if c == left:
+                count += 1
+            if c == right:
+                count -= 1
+            if count == 0:
+                row = self.row[1:j].strip()
+                self.row = self.row[j + 1:].strip()
+                return row
+        print(f'!!! The bracket is unclosed in {self.row}')
+        assert (False)
 
-        if '[' in s and '{' not in s:
-            # [s] has params, and has no value
-            key = s.split('[')[0]
-            params = s.split('[')[1].split(']')[0]
+    def parse(self):
+        assert (self.row.startswith(self.symbols['Key']))
+        parsed = []
+        self.row = self.row[1:].strip()
+        dct = dict(Key=self.hit_wall(), Params=[], Values=[])
 
-        if '[' not in s and '{' in s:
-            # [s] has no params, and has value
-            key = s.split('{')[0]
-            value = s.split('{')[1].split('}')[0]
+        while self.row:
+            if self.row.startswith(self.symbols['Key']):
+                parsed.append(dct)
+                self.row = self.row[1:].strip()
+                dct = dict(Key=self.hit_wall(), Params=[], Values=[])
 
-        if '[' not in s and '{' not in s:
-            # [s] has no params, and has no value
-            key = s
+            if self.row.startswith(self.symbols['Params'][0]):
+                dct['Params'].append(self.get_closed(self.symbols['Params']))
 
-        return dict(key=key, params=params, value=value)
+            if self.row.startswith(self.symbols['Values'][0]):
+                dct['Values'].append(self.get_closed(self.symbols['Values']))
 
-    return [_parse(s) for s in split]
+        parsed.append(dct)
+        self.parsed = parsed
+        return parsed
 
 
 class LaTeX_Parser(object):
@@ -73,6 +92,7 @@ class LaTeX_Parser(object):
     def __init__(self, path, show_step=True):
         self.path = path
         self.show_step = show_step
+        self.feature_row = FeatureRow()
 
     def read_file(self):
         # Read the file of [self.path]
@@ -109,8 +129,18 @@ class LaTeX_Parser(object):
     def parse_features(self):
         # Parse the [self.feature_lines]
         columns = [
-            'Key', 'Params', 'Value', 'Label', 'Tracking', 'ExpandTo', 'Level',
-            'Seek', 'LineCount'
+            # Contents
+            'Key',
+            'Params',
+            'Values',
+            'Label',
+            # Positions in iloc
+            'Tracking',
+            'ExpandTo',
+            # Others
+            'Level',
+            'Seek',
+            'LineCount'
         ]
         features = pd.DataFrame(columns=columns)
 
@@ -123,21 +153,22 @@ class LaTeX_Parser(object):
         for line in tqdm(self.feature_lines):
             # Parse the line
             content, seek, line_count = line
-            for parsed in parse_row(content):
-                key = parsed['key']
-                params = parsed['params']
-                value = parsed['value']
+            self.feature_row.load(content)
+            for parsed in self.feature_row.parse():
+                key = parsed['Key']
+                params = parsed['Params']
+                values = parsed['Values']
 
                 # Init dct
                 dct = dict(
                     Key=key,
                     Params=params,
-                    Value=value,
+                    Values=values,
                     Seek=seek,
                     LineCount=line_count,
                 )
 
-                if key in ['begin', 'end'] and value == 'document':
+                if key in ['begin', 'end'] and 'document' in values:
                     features = features.append(dct, ignore_index=True)
                     continue
 
@@ -185,7 +216,7 @@ class LaTeX_Parser(object):
                         # ! The name of the end has to equal with its begin
                         try:
                             assert (
-                                features['Value'].iloc[begin_iloc] == value)
+                                features['Values'].iloc[begin_iloc] == values)
                         except AssertionError as err:
                             _line_count = features['LineCount'].iloc[
                                 begin_iloc]
@@ -199,7 +230,7 @@ class LaTeX_Parser(object):
 
                 # Match label
                 if key in feature_labels and inner_count == 1:
-                    features['Label'].iloc[begin_iloc] = value
+                    features['Label'].iloc[begin_iloc] = values
 
                 # Record the [dct] finally
                 features = features.append(pd.Series(dct), ignore_index=True)
@@ -267,17 +298,23 @@ class LaTeX_Parser(object):
                     _add('<div class="indent">')
                 state['level'] = level
                 h = f'h{level}'
-                _add(_wrap(h, '{Key}: {Name}: {Label}'.format(**se)))
+                _add(
+                    _wrap(h,
+                          '{Key}: {Params}: {Values}: {Label}'.format(**se)))
                 continue
 
             # ExpandTo is not '-' means it is a beginner of a block
             if not se['ExpandTo'] == '-':
-                _add(_wrap('p', '{Key}: {Name}: {Label}'.format(**se)))
+                _add(
+                    _wrap('p',
+                          '{Key}: {Params}: {Values}: {Label}'.format(**se)))
                 continue
 
             # Print subfile as plant-text
             if se['Key'] == 'subfile':
-                _add(_wrap('p', '{Key}: {Name}: {Label}'.format(**se)))
+                _add(
+                    _wrap('p',
+                          '{Key}: {Params}: {Values}: {Label}'.format(**se)))
                 continue
 
         # Close the unclosed divs
